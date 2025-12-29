@@ -104,8 +104,8 @@ def main():
         frame_count = 0 
         save_count = 0
         # 定义可视化窗口的较小分辨率
-        viz_width = 640
-        viz_height = 360
+        viz_width = 480
+        viz_height = 240
         
         while save_count < MAX_FRAMES:
             # 等待帧
