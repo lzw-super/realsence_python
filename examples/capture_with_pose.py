@@ -6,6 +6,7 @@ from datetime import datetime
 import threading
 import time
 import math
+import open3d as o3d
 
 # ===================== 全局配置参数 =====================
 # 图像采集参数
@@ -13,7 +14,7 @@ WIDTH = 1280
 HEIGHT = 720
 FPS = 30
 MAX_FRAMES = 100  # 最多获取的帧数
-STRIDE = 5  # 帧间隔，每5帧保存一次
+STRIDE = 1  # 帧间隔，每5帧保存一次
 
 # IMU位姿估计参数（四元数版）
 alpha = 0.98  # 互补滤波器权重
@@ -23,10 +24,6 @@ last_gyro_ts = 0.0
 # 全局位姿存储（四元数：w, x, y, z），线程安全锁
 imu_quaternion = np.array([1.0, 0.0, 0.0, 0.0])  # 单位四元数初始值
 quaternion_lock = threading.Lock()
-
-# VO位姿存储（7元数：QW, QX, QY, QZ, TX, TY, TZ）
-vo_pose = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-vo_lock = threading.Lock()
 
 # ===================== 四元数工具函数 =====================
 def quaternion_multiply(q1, q2):
@@ -193,8 +190,11 @@ def imu_reader_thread():
     imu_config.enable_stream(rs.stream.accel, rs.format.motion_xyz32f)
     imu_config.enable_stream(rs.stream.gyro, rs.format.motion_xyz32f)
     
+    imu_started = False
+    
     try:
         imu_pipeline.start(imu_config)
+        imu_started = True
         print("IMU线程已启动，开始读取位姿数据...")
         
         while True:
@@ -215,12 +215,13 @@ def imu_reader_thread():
     except Exception as e:
         print(f"IMU线程出错: {e}")
     finally:
-        imu_pipeline.stop()
+        if imu_started:
+            imu_pipeline.stop()
 
 # ===================== 原有图像采集函数 =====================
 def create_output_folder():
     """创建带有时间戳的输出文件夹"""
-    base_dir = os.path.join(os.path.dirname(__file__) if '__file__' in locals() else os.getcwd(), 'out')
+    base_dir = r'E:\Users\lenovo\Desktop\realsense\realsence_python\examples\out'
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     output_dir = os.path.join(base_dir, f'capture_{timestamp}')
     os.makedirs(output_dir, exist_ok=True)
@@ -340,14 +341,6 @@ def main():
     # 启动管道
     profile = pipeline.start(config)
 
-    # 初始化视觉里程计（VO）模块
-    vo = rs.visual_odometry()
-    vo_config = rs.vo_config()
-    vo_config.enable_imu_fusion(True)  # 融合IMU数据提升精度
-    vo_config.set_from_pipeline_profile(profile)  # 从管道配置中获取相机参数
-    vo_config.set_max_distance(3.0)  # 设置最大有效深度距离（米）
-    print("视觉里程计(VO)已初始化，启用IMU融合...")
-
     # 获取并保存相机内外参
     save_camera_intrinsics_extrinsics(output_dir, profile)
 
@@ -358,6 +351,21 @@ def main():
     # 获取对齐流的配置，用于将深度图对齐到彩色图
     align_to = rs.stream.color
     align = rs.align(align_to)
+
+    # 初始化 Open3D RGBD odometry
+    color_stream = rs.video_stream_profile(profile.get_stream(rs.stream.color))
+    color_intrinsics = color_stream.get_intrinsics()
+    
+    intrinsic = o3d.camera.PinholeCameraIntrinsic(
+        WIDTH, HEIGHT, color_intrinsics.fx, color_intrinsics.fy,
+        color_intrinsics.ppx, color_intrinsics.ppy
+    )
+    
+    # 初始化轨迹
+    trajectory = [np.eye(4)]  # 第一帧设为世界原点
+    prev_rgbd = None
+    
+    print("Open3D RGBD odometry已初始化...")
 
     try:
         frame_count = 0 
@@ -378,27 +386,42 @@ def main():
             if not depth_frame or not color_frame:
                 continue
 
-            # 更新视觉里程计
-            vo_status = vo.process(aligned_frames, vo_config)
-            
-            # 获取VO位姿（7元数）
-            if vo_status == rs.rs2_visual_odometry_status.rs2_vos_valid:
-                pose = vo.get_pose()
-                with vo_lock:
-                    # 更新全局VO位姿（7元数：QW, QX, QY, QZ, TX, TY, TZ）
-                    vo_pose[0] = pose.rotation.w  # QW
-                    vo_pose[1] = pose.rotation.x  # QX
-                    vo_pose[2] = pose.rotation.y  # QY
-                    vo_pose[3] = pose.rotation.z  # QZ
-                    vo_pose[4] = pose.translation.x  # TX (米)
-                    vo_pose[5] = pose.translation.y  # TY (米)
-                    vo_pose[6] = pose.translation.z  # TZ (米)
-            else:
-                print(f"VO状态无效: {vo_status}")
-
             # 转换为 NumPy 数组
             depth_image = np.asanyarray(depth_frame.get_data())
             color_image = np.asanyarray(color_frame.get_data())
+            
+            # 使用Open3D计算位姿
+            depth_float = depth_image.astype(np.float32)
+            rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                o3d.geometry.Image(color_image),
+                o3d.geometry.Image(depth_float),
+                depth_scale=1000.0,
+                depth_trunc=10.0,
+                convert_rgb_to_intensity=False
+            )
+            
+            # 计算当前帧相对于上一帧的变换
+            vo_status = False
+            if prev_rgbd is not None:
+                jacobian = o3d.pipelines.odometry.RGBDOdometryJacobianFromHybridTerm()
+                success, trans, _ = o3d.pipelines.odometry.compute_rgbd_odometry(
+                    prev_rgbd, rgbd, intrinsic,
+                    np.eye(4), jacobian,
+                    o3d.pipelines.odometry.OdometryOption()
+                )
+                
+                if success:
+                    current_pose = trajectory[-1] @ trans
+                    trajectory.append(current_pose)
+                    vo_status = True
+                    prev_rgbd = rgbd
+                else:
+                    print(f"Frame {save_count}: VO跟踪失败！复用上一帧位姿")
+                    trajectory.append(trajectory[-1])
+            else:
+                # 第一帧
+                prev_rgbd = rgbd
+                vo_status = True
             
             # 深度图可视化（归一化到 0~255）
             depth_colormap = cv2.applyColorMap(
@@ -431,16 +454,33 @@ def main():
                 pitch_deg = math.degrees(pitch)
                 yaw_deg = math.degrees(yaw)
             
-            with vo_lock:
-                current_vo_pose = vo_pose.copy()
-                tx, ty, tz = current_vo_pose[4], current_vo_pose[5], current_vo_pose[6]
+            # 从轨迹中获取当前位姿
+            current_pose = trajectory[-1]
+            tx, ty, tz = current_pose[0, 3], current_pose[1, 3], current_pose[2, 3]
             
-            # 绘制位姿信息（包含IMU旋转和VO平移）
+            # 从旋转矩阵提取欧拉角
+            R = current_pose[:3, :3]
+            sy = math.sqrt(R[0,0] * R[0,0] +  R[1,0] * R[1,0])
+            singular = sy < 1e-6
+            if not singular:
+                vo_roll = math.atan2(R[2,1], R[2,2])
+                vo_pitch = math.atan2(-R[2,0], sy)
+                vo_yaw = math.atan2(R[1,0], R[0,0])
+            else:
+                vo_roll = math.atan2(-R[1,2], R[1,1])
+                vo_pitch = math.atan2(-R[2,0], sy)
+                vo_yaw = 0
+            
+            vo_roll_deg = math.degrees(vo_roll)
+            vo_pitch_deg = math.degrees(vo_pitch)
+            vo_yaw_deg = math.degrees(vo_yaw)
+            
+            # 绘制位姿信息（VO位姿）
             pose_display = empty_space.copy()
-            cv2.putText(pose_display, "Camera Pose (VO+IMU)", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-            cv2.putText(pose_display, f"Roll: {roll_deg:.2f}°", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
-            cv2.putText(pose_display, f"Pitch: {pitch_deg:.2f}°", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
-            cv2.putText(pose_display, f"Yaw: {yaw_deg:.2f}°", (20, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
+            cv2.putText(pose_display, "Camera Pose (Open3D VO)", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            cv2.putText(pose_display, f"Roll: {vo_roll_deg:.2f}°", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
+            cv2.putText(pose_display, f"Pitch: {vo_pitch_deg:.2f}°", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
+            cv2.putText(pose_display, f"Yaw: {vo_yaw_deg:.2f}°", (20, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 1)
             cv2.putText(pose_display, f"TX: {tx:.3f}m", (20, 200), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
             cv2.putText(pose_display, f"TY: {ty:.3f}m", (20, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
             cv2.putText(pose_display, f"TZ: {tz:.3f}m", (20, 280), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
@@ -457,7 +497,7 @@ def main():
                 break
             
             # 按间隔保存帧和对应的位姿
-            if frame_count % STRIDE == 0 and frame_count > 30: 
+            if frame_count % STRIDE == 0 and frame_count > 0: 
                 # 保存深度图 
                 depth_filename = os.path.join(output_dir, f'depth{save_count:04d}.png')
                 cv2.imwrite(depth_filename, depth_image)
@@ -466,14 +506,40 @@ def main():
                 color_filename = os.path.join(output_dir, f'frame{save_count:04d}.jpg')
                 cv2.imwrite(color_filename, color_image)
 
-                # 保存7元数位姿数据（优先使用VO位姿，无则用IMU旋转+0平移）
-                with vo_lock:
-                    if vo_status == rs.rs2_visual_odometry_status.rs2_vos_valid:
-                        save_pose_data(output_dir, save_count, vo_pose.copy())
-                    else:
-                        # 备用方案：IMU旋转 + 0平移
-                        backup_pose = np.array([current_q[0], current_q[1], current_q[2], current_q[3], 0.0, 0.0, 0.0])
-                        save_pose_data(output_dir, save_count, backup_pose)
+                # 从4x4变换矩阵提取7元数位姿
+                current_pose = trajectory[-1]
+                tx, ty, tz = current_pose[0, 3], current_pose[1, 3], current_pose[2, 3]
+                
+                # 从旋转矩阵提取四元数
+                R = current_pose[:3, :3]
+                trace = np.trace(R)
+                
+                if trace > 0:
+                    qw = math.sqrt(trace + 1.0) / 2.0
+                    qx = (R[2, 1] - R[1, 2]) / (4.0 * qw)
+                    qy = (R[0, 2] - R[2, 0]) / (4.0 * qw)
+                    qz = (R[1, 0] - R[0, 1]) / (4.0 * qw)
+                elif (R[0, 0] > R[1, 1]) and (R[0, 0] > R[2, 2]):
+                    s = 2.0 * math.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
+                    qw = (R[2, 1] - R[1, 2]) / s
+                    qx = 0.25 * s
+                    qy = (R[0, 1] + R[1, 0]) / s
+                    qz = (R[0, 2] + R[2, 0]) / s
+                elif R[1, 1] > R[2, 2]:
+                    s = 2.0 * math.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
+                    qw = (R[0, 2] - R[2, 0]) / s
+                    qx = (R[0, 1] + R[1, 0]) / s
+                    qy = 0.25 * s
+                    qz = (R[1, 2] + R[2, 1]) / s
+                else:
+                    s = 2.0 * math.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
+                    qw = (R[1, 0] - R[0, 1]) / s
+                    qx = (R[0, 2] + R[2, 0]) / s
+                    qy = (R[1, 2] + R[2, 1]) / s
+                    qz = 0.25 * s
+                
+                seven_dof_pose = np.array([qw, qx, qy, qz, tx, ty, tz])
+                save_pose_data(output_dir, save_count, seven_dof_pose)
 
                 save_count += 1
                 print(f"已保存第 {save_count}/{MAX_FRAMES} 帧 (含7元数位姿数据)")
