@@ -8,15 +8,17 @@ from datetime import datetime
 WIDTH = 1280
 HEIGHT = 720
 FPS = 30
-MAX_FRAMES = 100  # 最多获取的帧数
+MAX_FRAMES = 400  # 最多获取的帧数
 STRIDE = 5  # 帧间隔，每5帧保存一次
 def create_output_folder():
     """创建带有时间戳的输出文件夹"""
     base_dir = os.path.join(os.path.dirname(__file__), 'out')
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_dir = os.path.join(base_dir, f'capture_{timestamp}')
+    output_dir = os.path.join(base_dir, f'capture_{timestamp}') 
     os.makedirs(output_dir, exist_ok=True)
-    return output_dir
+    results_dir = os.path.join(output_dir, "results")
+    os.makedirs(results_dir, exist_ok=True)
+    return output_dir , results_dir
 
 def save_camera_intrinsics_extrinsics(output_dir, profile):
     """获取并保存相机内外参"""
@@ -32,20 +34,20 @@ def save_camera_intrinsics_extrinsics(output_dir, profile):
     extrinsics = depth_stream.get_extrinsics_to(color_stream)
     
     # 保存深度相机内参
-    depth_intrinsic_file = os.path.join(output_dir, 'depth_intrinsics.txt')
-    with open(depth_intrinsic_file, 'w') as f:
-        f.write("Depth Camera Intrinsics:\n")
-        f.write(f"Width: {depth_intrinsics.width}\n")
-        f.write(f"Height: {depth_intrinsics.height}\n")
-        f.write(f"PPX (Principal Point X): {depth_intrinsics.ppx}\n")
-        f.write(f"PPY (Principal Point Y): {depth_intrinsics.ppy}\n")
-        f.write(f"FX (Focal Length X): {depth_intrinsics.fx}\n")
-        f.write(f"FY (Focal Length Y): {depth_intrinsics.fy}\n")
-        f.write(f"Model: {depth_intrinsics.model}\n")
-        f.write(f"Coeffs (Distortion Coefficients): {list(depth_intrinsics.coeffs)}\n")
+    # depth_intrinsic_file = os.path.join(output_dir, 'depth_intrinsics.txt')
+    # with open(depth_intrinsic_file, 'w') as f:
+    #     f.write("Depth Camera Intrinsics:\n")
+    #     f.write(f"Width: {depth_intrinsics.width}\n")
+    #     f.write(f"Height: {depth_intrinsics.height}\n")
+    #     f.write(f"PPX (Principal Point X): {depth_intrinsics.ppx}\n")
+    #     f.write(f"PPY (Principal Point Y): {depth_intrinsics.ppy}\n")
+    #     f.write(f"FX (Focal Length X): {depth_intrinsics.fx}\n")
+    #     f.write(f"FY (Focal Length Y): {depth_intrinsics.fy}\n")
+    #     f.write(f"Model: {depth_intrinsics.model}\n")
+    #     f.write(f"Coeffs (Distortion Coefficients): {list(depth_intrinsics.coeffs)}\n")
     
-    # 保存彩色相机内参
-    color_intrinsic_file = os.path.join(output_dir, 'color_intrinsics.txt')
+    # 保存彩色相机内参  对齐后只需要RGB的内参
+    color_intrinsic_file = os.path.join(output_dir, 'intrinsics.txt')
     with open(color_intrinsic_file, 'w') as f:
         f.write("Color Camera Intrinsics:\n")
         f.write(f"Width: {color_intrinsics.width}\n")
@@ -67,14 +69,15 @@ def save_camera_intrinsics_extrinsics(output_dir, profile):
             f.write(f"  [{extrinsics.rotation[i*3]:.6f}, {extrinsics.rotation[i*3+1]:.6f}, {extrinsics.rotation[i*3+2]:.6f}]\n")
     
     print(f"相机参数已保存到: {output_dir}")
-    print(f"- 深度相机内参: depth_intrinsics.txt")
-    print(f"- 彩色相机内参: color_intrinsics.txt")
+    # print(f"- 深度相机内参: depth_intrinsics.txt")
+    print(f"- 彩色相机内参: intrinsics.txt")
     print(f"- 外参: extrinsics.txt")
 
 def main():
     # 创建输出文件夹
-    output_dir = create_output_folder()
+    output_dir , results_dir = create_output_folder()
     print(f"输出文件夹: {output_dir}")
+    print(f"结果文件夹: {results_dir}")
     print(f"分辨率: {WIDTH}x{HEIGHT}, 帧率: {FPS}")
     print(f"将获取 {MAX_FRAMES} 帧数据...")
 
@@ -104,8 +107,8 @@ def main():
         frame_count = 0 
         save_count = 0
         # 定义可视化窗口的较小分辨率
-        viz_width = 640
-        viz_height = 360
+        viz_width = 480
+        viz_height = 240
         
         while save_count < MAX_FRAMES:
             # 等待帧
@@ -165,11 +168,11 @@ def main():
                 break
             if frame_count % STRIDE == 0 and frame_count > 30: 
                 # 保存深度图 
-                depth_filename = os.path.join(output_dir, f'depth{save_count:04d}.png')
+                depth_filename = os.path.join(results_dir, f'depth{save_count:04d}.png')
                 cv2.imwrite(depth_filename, depth_image)
 
                 # 保存 RGB 图
-                color_filename = os.path.join(output_dir, f'frame{save_count:04d}.jpg')
+                color_filename = os.path.join(results_dir, f'frame{save_count:04d}.jpg')
                 cv2.imwrite(color_filename, color_image)
 
                 # # 保存深度映射到RGB的图像
@@ -181,7 +184,7 @@ def main():
             frame_count += 1
 
 
-        print(f"\n完成! 共保存 {save_count} 帧数据到: {output_dir}")
+        print(f"\n完成! 共保存 {save_count} 帧数据到: {results_dir}")
 
     finally:
         # 停止管道
