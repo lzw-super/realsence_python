@@ -32,9 +32,11 @@ def compute_poses_from_rgbd(data_dir, output_file="poses_16dof.txt"):
         data_dir: 包含RGB-D图像和内参文件的目录
         output_file: 输出位姿文件名
     """
-    # 自动获取所有 frame 和 depth 文件（按数字排序）
-    rgb_files = sorted([f for f in os.listdir(data_dir) if f.startswith("frame") and f.endswith(".jpg")])
-    depth_files = sorted([f for f in os.listdir(data_dir) if f.startswith("depth") and f.endswith(".png")])
+    # 自动获取所有 frame 和 depth 文件（按数字排序） 
+    rgb_pathes = os.path.join(data_dir,'rgb') 
+    depth_pathes = os.path.join(data_dir,'depth') 
+    rgb_files = sorted([f for f in os.listdir(rgb_pathes) if f.startswith("frame") and f.endswith(".jpg")])
+    depth_files = sorted([f for f in os.listdir(depth_pathes) if f.startswith("depth") and f.endswith(".png")])
     
     # 确保数量一致
     assert len(rgb_files) == len(depth_files), "RGB 和 Depth 图像数量不匹配！"
@@ -47,11 +49,13 @@ def compute_poses_from_rgbd(data_dir, output_file="poses_16dof.txt"):
     if not os.path.exists(intrinsic_path):
         intrinsic_path = os.path.join(data_dir, "color_intrinsics.txt")
     
-    fx, fy, cx, cy = load_intrinsic(intrinsic_path)
+    # fx, fy, cx, cy = load_intrinsic(intrinsic_path) 
+    fx,fy , cx ,cy = 600.0 ,600.0 , 599.5 , 339.5
+
     print(f"相机内参: fx={fx}, fy={fy}, cx={cx}, cy={cy}")
     
     # 获取图像尺寸（从第一张图读取）
-    first_rgb = cv2.imread(os.path.join(data_dir, rgb_files[0]))
+    first_rgb = cv2.imread(os.path.join(rgb_pathes, rgb_files[0]))
     height, width = first_rgb.shape[:2]
     
     # 创建Open3D相机内参
@@ -73,8 +77,8 @@ def compute_poses_from_rgbd(data_dir, output_file="poses_16dof.txt"):
     
     # 逐帧处理
     for i in range(num_frames):
-        rgb_path = os.path.join(data_dir, rgb_files[i])
-        depth_path = os.path.join(data_dir, depth_files[i])
+        rgb_path = os.path.join(rgb_pathes, rgb_files[i])
+        depth_path = os.path.join(depth_pathes, depth_files[i])
         
         color = cv2.imread(rgb_path)
         depth_raw = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)  # 16-bit
@@ -89,7 +93,7 @@ def compute_poses_from_rgbd(data_dir, output_file="poses_16dof.txt"):
         rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
             o3d.geometry.Image(color),
             o3d.geometry.Image(depth),
-            depth_scale=1000.0,      # mm → m
+            depth_scale=6553.5,      # mm → m
             depth_trunc=10.0,        # 忽略 10 米以外的深度（可调）
             convert_rgb_to_intensity=False
         )
@@ -190,7 +194,8 @@ def compute_poses_from_rgbd(data_dir, output_file="poses_16dof.txt"):
 
 if __name__ == '__main__':
     # 设置数据目录
-    data_dir = r'E:\Users\lenovo\Desktop\realsense\realsence_python\examples\out\capture_20251230_160728\results'
+    data_dir = r'E:\Users\lenovo\Desktop\realsense\realsence_python\examples\out\capture_20251230_160728\results' 
+    data_dir = r'C:\Users\77436\Desktop\results'
     
     # 计算位姿
     compute_poses_from_rgbd(data_dir)
