@@ -5,7 +5,7 @@ import numpy as np
 # 导入PIL库的Image模块，用于图像处理
 from PIL import Image
 # 从工具模块导入相机配置参数：WH(宽高)、RECORDER_DIR(录制目录)、DEPTH_MIN/MAX(深度阈值)
-from dovsg.utils.utils import WH, RECORDER_DIR, DEPTH_MIN, DEPTH_MAX
+# from dovsg.utils.utils import WH, RECORDER_DIR, DEPTH_MIN, DEPTH_MAX
 # 导入操作系统接口模块，用于文件和目录操作
 import os
 # 导入shutil模块，用于高级文件操作（如删除目录）
@@ -26,7 +26,29 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 # 导入typing模块的Union类型，用于类型提示
 from typing import Union
+WH = [1280, 720]  #  [640, 480]
 
+DEPTH_MIN = 0 # 0.2
+DEPTH_MAX = 2  # 2
+
+DEPTH_SCALE = 1000
+FPS = 30
+
+# AGV_IP = "192.168.188.168"
+# AGV_PORT = 9090
+# ROT2AGV_OFFSET_X = 0.11
+# ROT2AGV_ROTATION_ANGLE = 135
+# AVG_RATE_HZ = 10
+
+
+# CROP_INFO = {
+#     "top": 100,
+#     "bottom": 400,
+#     "left": 50,
+#     "right": 600
+# }
+
+RECORDER_DIR = Path("data_example")
 # 实际所需的图像尺寸，确保不捕获距离相机过近的深度和颜色数据
 real_height = 600  # 移除底部200像素以去除图像底部的机械臂
 real_width = 1200
