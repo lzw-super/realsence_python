@@ -3,6 +3,8 @@ import numpy as np
 import cv2
 import os
 from datetime import datetime
+from pathlib import Path
+from tqdm import tqdm
 
 # 配置参数
 WIDTH = 1280
@@ -10,6 +12,10 @@ HEIGHT = 720
 FPS = 30
 MAX_FRAMES = 400  # 最多获取的帧数
 STRIDE = 5  # 帧间隔，每5帧保存一次
+
+# 深度阈值配置
+DEPTH_MIN = 0
+DEPTH_MAX = 2
 def create_output_folder():
     """创建带有时间戳的输出文件夹"""
     base_dir = os.path.join(os.path.dirname(__file__), 'out')
@@ -18,7 +24,14 @@ def create_output_folder():
     os.makedirs(output_dir, exist_ok=True)
     results_dir = os.path.join(output_dir, "results")
     os.makedirs(results_dir, exist_ok=True)
-    return output_dir , results_dir
+    
+    # 创建 point 和 mask 子目录
+    point_dir = os.path.join(results_dir, "point")
+    mask_dir = os.path.join(results_dir, "mask")
+    os.makedirs(point_dir, exist_ok=True)
+    os.makedirs(mask_dir, exist_ok=True)
+    
+    return output_dir, results_dir
 
 def save_camera_intrinsics_extrinsics(output_dir, profile):
     """获取并保存相机内外参"""
@@ -73,6 +86,45 @@ def save_camera_intrinsics_extrinsics(output_dir, profile):
     print(f"- 彩色相机内参: intrinsics.txt")
     print(f"- 外参: extrinsics.txt")
 
+def _init_depth_process():
+    """初始化深度处理流程，设置各种滤波器以提高深度数据质量"""
+    # 创建深度到视差的转换器（True表示转换到视差空间）
+    depth_to_disparity = rs.disparity_transform(True)
+    # 创建视差到深度的转换器（False表示转换回深度空间）
+    disparity_to_depth = rs.disparity_transform(False)
+    # 创建空间滤波器，用于平滑深度图像
+    spatial = rs.spatial_filter()
+    # 设置空间滤波器的幅度参数（控制滤波强度）
+    spatial.set_option(rs.option.filter_magnitude, 5)
+    # 设置空间滤波器的平滑alpha参数（控制平滑程度，0-1之间）
+    spatial.set_option(rs.option.filter_smooth_alpha, 0.75)
+    # 设置空间滤波器的平滑delta参数（控制平滑的阈值）
+    spatial.set_option(rs.option.filter_smooth_delta, 1)
+    # 设置空间滤波器的孔洞填充参数（1表示填充小孔洞）
+    spatial.set_option(rs.option.holes_fill, 1)
+    # 创建时间滤波器，用于在时间维度上平滑深度数据
+    temporal = rs.temporal_filter()
+    # 设置时间滤波器的平滑alpha参数
+    temporal.set_option(rs.option.filter_smooth_alpha, 0.75)
+    # 设置时间滤波器的平滑delta参数
+    temporal.set_option(rs.option.filter_smooth_delta, 1)
+    
+    return depth_to_disparity, disparity_to_depth, spatial, temporal
+
+def _process_depth(depth_frame, depth_to_disparity, disparity_to_depth, spatial, temporal):
+    """对深度帧进行滤波处理，提高深度数据质量"""
+    # 深度处理流程
+    # 第一步：将深度转换为视差（视差空间更适合滤波）
+    filtered_depth = depth_to_disparity.process(depth_frame)
+    # 第二步：应用空间滤波器，平滑视差数据
+    filtered_depth = spatial.process(filtered_depth)
+    # 第三步：应用时间滤波器，在时间维度上平滑数据
+    filtered_depth = temporal.process(filtered_depth)
+    # 第四步：将视差转换回深度
+    filtered_depth = disparity_to_depth.process(filtered_depth)
+    # 返回处理后的深度帧
+    return filtered_depth
+
 def main():
     # 创建输出文件夹
     output_dir , results_dir = create_output_folder()
@@ -98,6 +150,10 @@ def main():
     # 获取深度传感器的深度缩放因子
     depth_sensor = profile.get_device().first_depth_sensor()
     depth_scale = depth_sensor.get_depth_scale()
+    clipping_distance = 1 / depth_scale
+
+    # 初始化深度处理流程
+    depth_to_disparity, disparity_to_depth, spatial, temporal = _init_depth_process()
 
     # 获取对齐流的配置，用于将深度图对齐到彩色图
     align_to = rs.stream.color
@@ -122,9 +178,28 @@ def main():
             if not depth_frame or not color_frame:
                 continue
 
+            # 对深度帧进行滤波处理
+            filtered_depth = _process_depth(depth_frame, depth_to_disparity, disparity_to_depth, spatial, temporal)
+
             # 转换为 NumPy 数组
-            depth_image = np.asanyarray(depth_frame.get_data())
+            depth_image = np.asanyarray(filtered_depth.get_data())
             color_image = np.asanyarray(color_frame.get_data())
+            
+            # 计算点云
+            pointcloud = rs.pointcloud()
+            pointcloud.map_to(color_frame)
+            pointcloud = pointcloud.calculate(filtered_depth)
+            points = (
+                np.asanyarray(pointcloud.get_vertices())
+                .view(np.float32)
+                .reshape([HEIGHT, WIDTH, 3])
+            )
+            
+            # 计算深度掩码
+            mask = np.logical_and(
+                (depth_image > DEPTH_MIN * clipping_distance),
+                (depth_image < DEPTH_MAX * clipping_distance)
+            )
             
             # 深度图可视化（归一化到 0~255）
             depth_colormap = cv2.applyColorMap(
@@ -167,13 +242,21 @@ def main():
             if key == ord('q') or key == 27:  # 'q' key or Esc key (ASCII 27)
                 break
             if frame_count % STRIDE == 0 and frame_count > 30: 
-                # 保存深度图 
-                depth_filename = os.path.join(results_dir, f'depth{save_count:04d}.png')
-                cv2.imwrite(depth_filename, depth_image)
+                # 保存深度图 (npy格式)
+                depth_filename = os.path.join(results_dir, f'depth{save_count:04d}.npy')
+                np.save(depth_filename, depth_image)
 
                 # 保存 RGB 图
                 color_filename = os.path.join(results_dir, f'frame{save_count:04d}.jpg')
                 cv2.imwrite(color_filename, color_image)
+                
+                # 保存点云数据 (npy格式)
+                point_filename = os.path.join(results_dir, 'point', f'{save_count:04d}.npy')
+                np.save(point_filename, points)
+                
+                # 保存掩码数据 (npy格式)
+                mask_filename = os.path.join(results_dir, 'mask', f'{save_count:04d}.npy')
+                np.save(mask_filename, mask)
 
                 # # 保存深度映射到RGB的图像
                 # mapped_filename = os.path.join(output_dir, f'depth_mapped_rgb{save_count:04d}.jpg')
